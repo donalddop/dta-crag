@@ -1,202 +1,263 @@
-"""Streamlit demo UI for the Dutch Tax Authority CRAG prototype."""
+"""
+dta-crag · Streamlit UI
+
+Run with:
+    streamlit run app.py
+"""
+
+from __future__ import annotations
 
 import os
-import sys
+import time
 from pathlib import Path
 
-# Make src importable when running `streamlit run app.py` from crag_poc/
-sys.path.insert(0, str(Path(__file__).parent))
-
+import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
 
-import streamlit as st
-
-from src.graph import CRAGState, build_graph
-from src.memory import get_recent_runs
-
 # ── Page config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="CRAG — Dutch Tax Authority",
-    page_icon="🏛️",
+    page_title="dta-crag · Dutch Tax Advisor",
+    page_icon="⚖️",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# ── Sidebar: Tier-2 memory ────────────────────────────────────────────────────
+# ── CSS ───────────────────────────────────────────────────────────────────────
+
+st.markdown(
+    """
+    <style>
+    .stApp { background-color: #0f1117; }
+    .status-box {
+        background: #1a1d27;
+        border-left: 3px solid #4A90D9;
+        padding: 0.5rem 1rem;
+        border-radius: 4px;
+        margin: 0.25rem 0;
+        font-family: monospace;
+        font-size: 0.85rem;
+        color: #aab;
+    }
+    .score-good  { color: #2ecc71; font-weight: bold; }
+    .score-warn  { color: #f39c12; font-weight: bold; }
+    .score-bad   { color: #e74c3c; font-weight: bold; }
+    .chunk-card {
+        background: #1a1d27;
+        border: 1px solid #2a2d3a;
+        border-radius: 6px;
+        padding: 0.75rem 1rem;
+        margin: 0.4rem 0;
+    }
+    .relevant-tag   { color: #2ecc71; font-weight: bold; font-size: 0.8rem; }
+    .irrelevant-tag { color: #e74c3c; font-weight: bold; font-size: 0.8rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ── Session state ─────────────────────────────────────────────────────────────
+
+if "history" not in st.session_state:
+    st.session_state.history = []  # list of {query, answer, score, flagged, chunks, grades}
+if "api_key_ok" not in st.session_state:
+    st.session_state.api_key_ok = bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.header("📚 Memory — Last 3 Queries")
-    recent = get_recent_runs(3)
-    if recent:
-        for run in reversed(recent):
-            label = run["query"][:55] + ("…" if len(run["query"]) > 55 else "")
-            flagged = run.get("is_flagged", False)
-            icon = "🔴" if flagged else "🟢"
-            with st.expander(f"{icon} {label}"):
-                st.caption(run.get("timestamp", "")[:19])
-                st.write(run["answer"][:300] + ("…" if len(run["answer"]) > 300 else ""))
-                gs = run.get("grade_summary", {})
-                if gs.get("grades"):
-                    st.caption("Grades: " + " | ".join(gs["grades"]))
-    else:
-        st.info("No past queries yet. Run a question to populate memory.")
+    st.markdown("## ⚖️ dta-crag")
+    st.caption("Dutch Tax Advisor · Corrective RAG")
+    st.divider()
+
+    api_key_input = st.text_input(
+        "Anthropic API key",
+        type="password",
+        value=os.environ.get("ANTHROPIC_API_KEY", ""),
+        help="Required. Set in .env file or paste here.",
+    )
+    if api_key_input:
+        os.environ["ANTHROPIC_API_KEY"] = api_key_input
+        st.session_state.api_key_ok = True
 
     st.divider()
-    st.caption(
-        "**Tier 1** In-context state (LangGraph)\n\n"
-        "**Tier 2** JSON store (`data/memory_store.json`)\n\n"
-        "**Tier 3** Episodic log (`data/episodic_log.json`)"
-    )
+
+    st.markdown("**Pipeline settings**")
+    show_chunks = st.toggle("Show retrieved chunks", value=True)
+    show_pipeline = st.toggle("Show pipeline trace", value=True)
+
+    st.divider()
+
+    if st.button("🗑️ Clear history"):
+        st.session_state.history = []
+        st.rerun()
+
+    st.divider()
+
+    # Stats
+    try:
+        from src.memory import get_stats
+        stats = get_stats()
+        if stats["total_queries"] > 0:
+            st.markdown("**Session stats**")
+            st.metric("Queries answered", stats["total_queries"])
+            st.metric("Avg faithfulness", f"{stats['avg_faithfulness']:.0%}")
+            st.metric("Flag rate", f"{stats['flag_rate']:.0%}")
+    except Exception:
+        pass
+
+    st.divider()
+    st.caption("Sources: Wet IB 2001 · Wet OB 1968 · Wet VPB 1969 · Wet LB 1964 · AWR")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-st.title("🏛️ CRAG — Dutch Tax Authority")
+st.title("⚖️ Dutch Tax Advisor")
 st.markdown(
-    "Corrective Retrieval-Augmented Generation · "
-    "Retrieve → Grade → Rewrite? → Generate → Critic"
+    "Ask a question about Dutch tax law. "
+    "The pipeline retrieves relevant legal articles, grades them, "
+    "generates an answer, and scores its own faithfulness."
 )
 
-api_configured = bool(os.getenv("ANTHROPIC_API_KEY"))
-ls_configured = bool(os.getenv("LANGSMITH_API_KEY"))
+# Example questions
+with st.expander("💡 Example questions"):
+    examples = [
+        "Wat is het tarief voor vennootschapsbelasting in 2024?",
+        "Hoe werkt de deelnemingsvrijstelling?",
+        "Wat zijn de btw-tarieven in Nederland?",
+        "Wanneer is er sprake van een aanmerkelijk belang?",
+        "Hoe werkt de werkkostenregeling?",
+        "Wat is de bijtelling voor een elektrische auto van de zaak?",
+        "Hoe wordt box 3 belast na het Kerstarrest?",
+        "Wat zijn de regels voor de kleineondernemersregeling?",
+    ]
+    cols = st.columns(2)
+    for i, ex in enumerate(examples):
+        if cols[i % 2].button(ex, key=f"ex_{i}", use_container_width=True):
+            st.session_state["prefill"] = ex
 
-col_api, col_ls = st.columns(2)
-col_api.caption(f"Anthropic API: {'✅ configured' if api_configured else '⚠️ not set — running in mock mode'}")
-col_ls.caption(f"LangSmith: {'✅ tracing active' if ls_configured else '⚠️ not set — tracing disabled'}")
-
-st.divider()
-
-query = st.text_input(
-    "Your Dutch tax question:",
-    placeholder="What is the income tax rate for box 1 in 2024?",
+query = st.chat_input(
+    "Stel uw belastingvraag… / Ask your tax question…",
 )
 
-run_btn = st.button("Ask", type="primary", disabled=not query)
+# Handle prefill from example buttons
+if "prefill" in st.session_state:
+    query = st.session_state.pop("prefill")
 
-if run_btn and query:
-    # ── Pipeline status row ───────────────────────────────────────────────────
-    st.markdown("#### Pipeline")
-    p_col1, p_col2, p_col3, p_col4 = st.columns(4)
-    ph_retrieve  = p_col1.empty()
-    ph_grade     = p_col2.empty()
-    ph_generate  = p_col3.empty()
-    ph_critic    = p_col4.empty()
+# ── Run pipeline ──────────────────────────────────────────────────────────────
 
-    for ph, label in [(ph_retrieve, "Retriever"), (ph_grade, "Grader"),
-                      (ph_generate, "Generator"), (ph_critic, "Critic")]:
-        ph.info(f"⏳ {label}")
+if query:
+    if not st.session_state.api_key_ok:
+        st.error("Please set your Anthropic API key in the sidebar.")
+        st.stop()
 
-    detail_area = st.empty()
+    from src.graph import run_pipeline
+    from src.memory import cache_get, cache_put, log_query, session_add
 
-    # ── Run graph with streaming ──────────────────────────────────────────────
-    graph = build_graph()
-    initial: CRAGState = {
-        "query": query,
-        "original_query": query,
-        "chunks": [],
-        "grades": [],
-        "rewrite_count": 0,
-        "answer": "",
-        "hallucination_score": 0.0,
-        "is_flagged": False,
-    }
-
-    final: dict = dict(initial)
-    rewrite_rounds: list[str] = []
-
-    for event in graph.stream(initial):
-        for node_name, updates in event.items():
-            if node_name.startswith("__"):
-                continue
-            final.update(updates)
-
-            if node_name == "retrieve":
-                n = len(updates.get("chunks", []))
-                ph_retrieve.success(f"✓ Retriever ({n} chunks)")
-
-            elif node_name == "grade":
-                grades = updates.get("grades", [])
-                grade_str = " | ".join(grades) if grades else "—"
-                ph_grade.success(f"✓ Grader")
-                with detail_area.container():
-                    st.markdown(f"**Chunk grades:** `{grade_str}`")
-
-            elif node_name == "rewrite":
-                new_q = updates.get("query", "")
-                rewrite_rounds.append(new_q)
-                detail_area.warning(
-                    f"🔄 **Query rewritten** (attempt {len(rewrite_rounds)}):\n\n_{new_q}_"
-                )
-                # Reset retriever/grader indicators for the next loop
-                ph_retrieve.info("↻ Retriever")
-                ph_grade.info("↻ Grader")
-
-            elif node_name == "generate":
-                ph_generate.success("✓ Generator")
-
-            elif node_name == "hallucination_check":
-                score = updates.get("hallucination_score", 0.0)
-                flagged = updates.get("is_flagged", False)
-                if flagged:
-                    ph_critic.error(f"✗ Critic ({score:.2f})")
-                else:
-                    ph_critic.success(f"✓ Critic ({score:.2f})")
-
-    detail_area.empty()
-
-    # ── Results ───────────────────────────────────────────────────────────────
-    st.divider()
-
-    score = final.get("hallucination_score", 0.0)
-    flagged = final.get("is_flagged", False)
-
-    # Faithfulness score badge
-    score_pct = int(score * 100)
-    if flagged:
-        st.error(f"⚠️ Faithfulness score: **{score:.2f}** ({score_pct}%) — below 0.70 threshold · Safe fallback returned")
+    # Check cache
+    cached = cache_get(query)
+    if cached:
+        st.session_state.history.append(
+            {
+                "query": query,
+                "answer": cached["answer"],
+                "score": cached["hallucination_score"],
+                "flagged": cached["is_flagged"],
+                "chunks": [],
+                "grades": [],
+                "cached": True,
+            }
+        )
     else:
-        st.success(f"✓ Faithfulness score: **{score:.2f}** ({score_pct}%) — answer verified")
+        status_placeholder = st.empty()
 
-    # Rewrite history
-    if rewrite_rounds:
-        st.info(
-            f"Query was rewritten **{len(rewrite_rounds)}** time(s).\n\n"
-            + "\n".join(f"- Attempt {i+1}: _{q}_" for i, q in enumerate(rewrite_rounds))
+        def _status(msg: str) -> None:
+            status_placeholder.markdown(
+                f'<div class="status-box">⚙ {msg}</div>', unsafe_allow_html=True
+            )
+
+        _status("Retrieving relevant articles…")
+        t0 = time.time()
+
+        try:
+            state = run_pipeline(query)
+        except EnvironmentError as e:
+            st.error(str(e))
+            st.stop()
+        except Exception as e:
+            st.error(f"Pipeline error: {e}")
+            st.stop()
+
+        elapsed = time.time() - t0
+        status_placeholder.empty()
+
+        cache_put(query, state)
+        log_query(state)
+        session_add(query, state["answer"])
+
+        st.session_state.history.append(
+            {
+                "query": query,
+                "answer": state["answer"],
+                "score": state["hallucination_score"],
+                "flagged": state["is_flagged"],
+                "chunks": state["chunks"],
+                "grades": state["grades"],
+                "rewrite_count": state["rewrite_count"],
+                "elapsed": elapsed,
+                "cached": False,
+            }
         )
 
-    # Answer
-    st.markdown("### Answer")
-    st.write(final.get("answer", ""))
+# ── Render history ────────────────────────────────────────────────────────────
 
-    # Source chunks
-    chunks: list[dict] = final.get("chunks", [])
-    grades: list[str] = final.get("grades", [])
-    if chunks:
-        st.markdown("### Source Chunks")
-        for chunk, grade in zip(chunks, grades or [""] * len(chunks)):
-            icon = {"RELEVANT": "🟢", "PARTIAL": "🟡", "IRRELEVANT": "🔴"}.get(grade, "⚪")
-            with st.expander(f"{icon} [{chunk['article']}] — {grade or 'ungraded'}"):
-                st.write(chunk["text"])
-                st.caption(f"Source: {chunk['source']} · Year: {chunk['year']}")
+for item in reversed(st.session_state.history):
+    with st.chat_message("user"):
+        st.write(item["query"])
 
-    # LangSmith trace link
-    if ls_configured:
-        ls_project = os.getenv("LANGSMITH_PROJECT", "crag-poc-dutch-tax")
-        try:
-            from langsmith import Client
-            client = Client()
-            runs = list(client.list_runs(project_name=ls_project, limit=1, is_root=True))
-            if runs:
-                run_id = str(runs[0].id)
-                # LangSmith URL pattern
-                trace_url = (
-                    f"https://smith.langchain.com/o/runs/{run_id}"
-                    if not hasattr(runs[0], "url") or not runs[0].url
-                    else runs[0].url
-                )
-                st.markdown(f"[View LangSmith trace →]({trace_url})")
-            else:
-                st.caption(f"Traces available at [smith.langchain.com](https://smith.langchain.com) · project: `{ls_project}`")
-        except Exception:
-            st.caption(f"Traces available at [smith.langchain.com](https://smith.langchain.com) · project: `{ls_project}`")
+    with st.chat_message("assistant"):
+        st.write(item["answer"])
+
+        # Faithfulness badge
+        score = item["score"]
+        if score >= 0.85:
+            badge = f'<span class="score-good">✓ Faithfulness: {score:.0%}</span>'
+        elif score >= 0.70:
+            badge = f'<span class="score-warn">⚠ Faithfulness: {score:.0%}</span>'
+        else:
+            badge = f'<span class="score-bad">✗ Faithfulness: {score:.0%} — flagged</span>'
+
+        meta_parts = [badge]
+        if item.get("cached"):
+            meta_parts.append("📦 cached")
+        if item.get("rewrite_count", 0) > 0:
+            meta_parts.append(f"↺ {item['rewrite_count']} rewrite(s)")
+        if item.get("elapsed"):
+            meta_parts.append(f"⏱ {item['elapsed']:.1f}s")
+
+        st.markdown(" · ".join(meta_parts), unsafe_allow_html=True)
+
+        # Pipeline trace
+        if show_pipeline and item.get("grades"):
+            with st.expander("Pipeline trace", expanded=False):
+                relevant = item["grades"].count("RELEVANT")
+                total = len(item["grades"])
+                st.progress(relevant / total if total else 0, text=f"{relevant}/{total} chunks relevant")
+
+        # Chunks
+        if show_chunks and item.get("chunks"):
+            with st.expander(f"Retrieved chunks ({len(item['chunks'])})", expanded=False):
+                for chunk, grade in zip(item["chunks"], item.get("grades", [])):
+                    tag_class = "relevant-tag" if grade == "RELEVANT" else "irrelevant-tag"
+                    tag_label = "● RELEVANT" if grade == "RELEVANT" else "● IRRELEVANT"
+                    st.markdown(
+                        f"""<div class="chunk-card">
+                        <strong>{chunk['source']} – {chunk['article']}</strong>
+                        &nbsp;&nbsp;<span class="{tag_class}">{tag_label}</span>
+                        &nbsp;&nbsp;<span style="color:#666;font-size:0.8rem">sim={chunk['score']:.3f}</span>
+                        <br/><em>{chunk['title']}</em>
+                        <p style="color:#ccd;margin-top:0.5rem;font-size:0.85rem">{chunk['text'][:400]}…</p>
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )

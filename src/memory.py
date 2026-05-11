@@ -1,83 +1,123 @@
-"""Three-tier memory layer.
+"""
+Three-tier memory for the CRAG pipeline.
 
-Tier 1 — in-context state: already in the LangGraph CRAGState dict; nothing extra here.
-Tier 2 — JSON file store: persists every completed run for few-shot retrieval.
-Tier 3 — episodic log: appends a correction note whenever hallucination_score < 0.7.
+Tier 1 — Semantic cache:    recent (query, answer) pairs to avoid duplicate LLM calls.
+Tier 2 — Session context:   in-memory list of this session's exchanges (for follow-ups).
+Tier 3 — Episodic log:      persistent JSON log of all queries + outcomes.
 """
 
+from __future__ import annotations
+
 import json
-from datetime import datetime
+import time
 from pathlib import Path
-from typing import Any
+from typing import Optional
 
-DATA_DIR = Path(__file__).parent.parent / "data"
-MEMORY_STORE_PATH = DATA_DIR / "memory_store.json"
-EPISODIC_LOG_PATH = DATA_DIR / "episodic_log.json"
+_HERE = Path(__file__).parent.parent
+MEMORY_STORE_PATH = _HERE / "data" / "memory_store.json"
+EPISODIC_LOG_PATH = _HERE / "data" / "episodic_log.json"
 
+# ── Tier 1: Semantic cache ────────────────────────────────────────────────────
 
-def _load_json(path: Path) -> list:
-    if not path.exists():
-        return []
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+_cache: dict[str, dict] = {}  # key: normalised query string
 
 
-def _save_json(path: Path, data: list) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+def _normalise(query: str) -> str:
+    return query.strip().lower()
 
 
-# ── Tier 2: persistent memory store ──────────────────────────────────────────
-
-def save_run_to_memory(
-    query: str,
-    answer: str,
-    grade_summary: dict[str, Any],
-    is_flagged: bool = False,
-) -> None:
-    store = _load_json(MEMORY_STORE_PATH)
-    store.append({
-        "query": query,
-        "answer": answer,
-        "grade_summary": grade_summary,
-        "is_flagged": is_flagged,
-        "timestamp": datetime.now().isoformat(),
-    })
-    _save_json(MEMORY_STORE_PATH, store)
+def cache_get(query: str) -> Optional[dict]:
+    """Return cached result for an identical query, or None."""
+    return _cache.get(_normalise(query))
 
 
-def get_recent_runs(n: int = 3) -> list[dict]:
-    store = _load_json(MEMORY_STORE_PATH)
-    return store[-n:] if store else []
+def cache_put(query: str, state: dict) -> None:
+    """Store the result for a query."""
+    _cache[_normalise(query)] = {
+        "answer": state.get("answer", ""),
+        "hallucination_score": state.get("hallucination_score", 0.0),
+        "is_flagged": state.get("is_flagged", False),
+        "rewrite_count": state.get("rewrite_count", 0),
+        "timestamp": time.time(),
+    }
 
 
-def build_few_shot_section(n: int = 3) -> str:
-    """Return a formatted few-shot block from the most recent successful runs."""
-    examples = [r for r in get_recent_runs(n) if not r.get("is_flagged")]
-    if not examples:
+def cache_clear() -> None:
+    _cache.clear()
+
+
+# ── Tier 2: Session context ───────────────────────────────────────────────────
+
+_session: list[dict] = []
+
+
+def session_add(query: str, answer: str) -> None:
+    _session.append({"query": query, "answer": answer, "timestamp": time.time()})
+
+
+def session_get_context(n: int = 3) -> str:
+    """Return the last n exchanges as a formatted string for prompt context."""
+    recent = _session[-n:] if len(_session) >= n else _session
+    if not recent:
         return ""
-    lines = ["\nPrevious Q&A examples (for context):"]
-    for ex in examples:
-        preview = ex["answer"][:300].rstrip()
-        if len(ex["answer"]) > 300:
-            preview += "…"
-        lines.append(f"\nQ: {ex['query']}\nA: {preview}")
-    return "\n".join(lines)
+    lines = []
+    for ex in recent:
+        lines.append(f"Q: {ex['query']}\nA: {ex['answer'][:300]}...")
+    return "\n\n".join(lines)
 
 
-# ── Tier 3: episodic correction log ──────────────────────────────────────────
+def session_clear() -> None:
+    _session.clear()
 
-def log_correction(query: str, flagged_answer: str, hallucination_score: float) -> None:
-    log = _load_json(EPISODIC_LOG_PATH)
-    log.append({
-        "query": query,
-        "flagged_answer": flagged_answer,
-        "hallucination_score": hallucination_score,
-        "timestamp": datetime.now().isoformat(),
-        "correction_note": (
-            f"Answer flagged: faithfulness score {hallucination_score:.2f} "
-            "is below the 0.70 threshold. Safe fallback was returned to the user."
-        ),
-    })
-    _save_json(EPISODIC_LOG_PATH, log)
+
+# ── Tier 3: Episodic log ──────────────────────────────────────────────────────
+
+def _load_log() -> list[dict]:
+    if EPISODIC_LOG_PATH.exists():
+        try:
+            return json.loads(EPISODIC_LOG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+    return []
+
+
+def _save_log(log: list[dict]) -> None:
+    EPISODIC_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    EPISODIC_LOG_PATH.write_text(
+        json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def log_query(state: dict) -> None:
+    """Append the final state of a pipeline run to the episodic log."""
+    log = _load_log()
+    log.append(
+        {
+            "timestamp": time.time(),
+            "original_query": state.get("original_query", ""),
+            "final_query": state.get("query", ""),
+            "rewrite_count": state.get("rewrite_count", 0),
+            "num_chunks": len(state.get("chunks", [])),
+            "num_relevant": state.get("grades", []).count("RELEVANT"),
+            "hallucination_score": state.get("hallucination_score", 0.0),
+            "is_flagged": state.get("is_flagged", False),
+        }
+    )
+    _save_log(log)
+
+
+def get_stats() -> dict:
+    """Return aggregate stats from the episodic log."""
+    log = _load_log()
+    if not log:
+        return {"total_queries": 0}
+    scores = [e["hallucination_score"] for e in log]
+    flagged = sum(1 for e in log if e["is_flagged"])
+    rewrites = sum(e["rewrite_count"] for e in log)
+    return {
+        "total_queries": len(log),
+        "flagged": flagged,
+        "flag_rate": round(flagged / len(log), 3),
+        "avg_faithfulness": round(sum(scores) / len(scores), 3),
+        "total_rewrites": rewrites,
+    }

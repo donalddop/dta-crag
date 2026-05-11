@@ -1,30 +1,58 @@
-# Retriever Agent
+# Skill: Retriever
 
 ## Role
-Fetches relevant Dutch tax law document chunks for the current query.
+The Retriever agent queries the FAISS-like vector store and returns the top-k most semantically similar chunks for a given query.
 
-## Input (from CRAGState)
-- `query` — the current search query (may have been rewritten by the Rewriter)
+## Implementation
+- **File**: `src/retriever.py`
+- **Vector store**: Chroma (persistent, stored in `data/chroma_db/`)
+- **Embedding model**: `paraphrase-multilingual-MiniLM-L12-v2` (sentence-transformers, ~120 MB, auto-downloaded on first run)
+- **Distance metric**: Cosine similarity
 
-## Output (state update)
-- `chunks` — list of `{id, article, text, source, year}` dicts
+## Corpus
+The corpus covers four Dutch tax laws and supporting regulation:
 
-## Current implementation
-Mock keyword-based retrieval over a hardcoded corpus of six chunks covering:
-- **Wet IB 2001, Art. 2.10** — box 1 income tax rates 2024
-- **Wet IB 2001, Art. 4.6** — box 2 substantial interest rates 2024
-- **Wet IB 2001, Art. 5.2** — box 3 capital savings tax 2024
-- **Wet OB 1968, Art. 9** — VAT rates 2024
-- **Wet DB 1965, Art. 1** — dividend withholding tax 2024
-- **Wet VPB 1969, Art. 22** — corporate tax rates 2024
+| ID prefix | Source | Topics |
+|-----------|--------|--------|
+| `ib_*`    | Wet IB 2001 | Income tax: box 1/2/3, deductions, own home, aanmerkelijk belang |
+| `ob_*`    | Wet OB 1968 | VAT: rates (21%/9%/0%), exemptions, input tax, KOR |
+| `vpb_*`   | Wet VPB 1969 | Corporate tax: rates, participation exemption, fiscal unity, innovation box |
+| `lb_*`    | Wet LB 1964 | Payroll tax: WKR, company car bijtelling, brackets |
+| `awr_*`   | AWR | Reassessment (navordering), penalties |
+| `*`       | Successiewet 1956, BPM, Dividendbelasting | Inheritance, gift tax, vehicle tax |
 
-## Upgrade path
-Replace `_mock_retrieve()` in `src/nodes.py` with a real vector store:
+## Public API
+
 ```python
-# e.g. using pgvector, Pinecone, or Chroma
-results = vector_store.similarity_search(query, k=5)
+from src.retriever import retrieve, reset_index
+
+chunks = retrieve(query="Wat is het btw-tarief?", k=5)
 ```
 
-## Contract
-- Always returns at least one chunk (even for unrecognised queries)
-- For unrecognised queries returns `chunk_001` as a fallback; Grader will classify it IRRELEVANT
+Each returned chunk is a dict:
+
+```python
+{
+    "id":      "ob_9",
+    "source":  "Wet OB 1968",
+    "article": "Art. 9",
+    "title":   "Tarieven omzetbelasting",
+    "text":    "De belasting bedraagt 21% (algemeen tarief)…",
+    "score":   0.8731,   # cosine similarity, higher = more relevant
+}
+```
+
+## Default behaviour
+- `k=5` chunks returned per query
+- First call builds and persists the Chroma index (slow, ~5–15 s)
+- Subsequent calls load from disk (fast, <1 s)
+
+## Rebuilding the index
+Run after editing `src/corpus.py`:
+
+```bash
+uv run python -c "from src.retriever import reset_index; reset_index()"
+```
+
+## Routing context
+The Retriever is always the first node after the Supervisor routes a query to the TAX_AGENT. After retrieval, control passes to the Grader.

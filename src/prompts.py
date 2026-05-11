@@ -1,99 +1,88 @@
-"""All LLM prompt templates. No inline prompt strings anywhere else in the codebase."""
+"""
+All prompt templates for the dta-crag pipeline.
+"""
 
-# ── Grader (claude-sonnet-4-6) ────────────────────────────────────────────────
+GRADER_SYSTEM = """\
+Je bent een expert in Nederlands belastingrecht.
+Beoordeel of het gegeven tekstfragment relevant is voor de gestelde vraag.
+Antwoord uitsluitend met één woord: RELEVANT of IRRELEVANT.
+Geen uitleg, geen opmaak — alleen het oordeel."""
 
-GRADE_SYSTEM_PROMPT = """You are a retrieval quality grader for a Dutch tax law RAG system.
-Classify whether a document chunk is relevant to the user's question.
+GRADER_USER = """\
+VRAAG: {query}
 
-Respond with exactly one word:
-- RELEVANT  — chunk directly addresses the question with useful information
-- PARTIAL   — chunk has related information but does not fully address the question
-- IRRELEVANT — chunk does not address the question at all"""
+FRAGMENT ({source} {article}):
+{text}
 
-GRADE_USER_PROMPT = """Question: {query}
+Oordeel (RELEVANT of IRRELEVANT):"""
 
-Document chunk:
----
-Article: {article}
-Text: {chunk_text}
----
+# ─────────────────────────────────────────────────────────────────────────────
 
-Classification (RELEVANT / PARTIAL / IRRELEVANT):"""
+REWRITER_SYSTEM = """\
+Je bent een expert in het herformuleren van belastingvragen voor zoeksystemen.
+Herschrijf de vraag zodat deze specifieker en beter geschikt is voor retrieval
+uit een corpus van Nederlandse belastingwetgeving.
+Geef alleen de herschreven vraag terug, zonder uitleg."""
 
-# ── Generator (claude-opus-4-7) ───────────────────────────────────────────────
+REWRITER_USER = """\
+Originele vraag: {query}
 
-GENERATE_SYSTEM_PROMPT = """You are a Dutch tax law expert assistant working for the Dutch Tax Authority (Belastingdienst).
+Herschreven vraag:"""
 
-Domain rules:
-1. Always cite article numbers when referencing tax law (e.g. "Wet IB 2001, Art. 2.10")
-2. Only answer questions within Dutch tax law scope
-3. If a question is outside Dutch tax law scope, respond with exactly:
-   DOMAIN_VIOLATION: This question falls outside Dutch tax law scope.
-4. Use only the provided source chunks as your factual basis
-5. Mention the applicable tax year when citing rates or thresholds
-6. Distinguish between tax boxes (box 1, 2, 3) where applicable"""
+# ─────────────────────────────────────────────────────────────────────────────
 
-GENERATE_USER_PROMPT = """Source chunks:
-{chunks}
-{few_shot_section}
-Question: {query}
+GENERATOR_SYSTEM = """\
+Je bent een deskundige belastingadviseur gespecialiseerd in Nederlands belastingrecht.
+Beantwoord de vraag uitsluitend op basis van de aangeleverde wetsartikelen.
+Wees nauwkeurig, concreet en verwijs naar de relevante artikelen.
+Als de aangeleverde context onvoldoende is om de vraag volledig te beantwoorden,
+geef dat dan expliciet aan.
+Antwoord in het Nederlands."""
 
-Answer (cite article numbers, be precise about rates and thresholds):"""
+GENERATOR_USER = """\
+VRAAG: {query}
 
-# ── Rewriter (claude-sonnet-4-6) ──────────────────────────────────────────────
+RELEVANTE WETSARTIKELEN:
+{context}
 
-REWRITE_SYSTEM_PROMPT = """You are a query optimizer for a Dutch tax law retrieval system.
-The original query failed to retrieve sufficiently relevant documents.
+Antwoord:"""
 
-Rewrite the query to:
-- Use proper Dutch tax terminology (inkomstenbelasting, vennootschapsbelasting, btw, etc.)
-- Include specific box numbers if applicable (box 1, box 2, box 3)
-- Add the relevant year if inferable (e.g. 2024)
-- Be more specific and targeted for document retrieval
+# ─────────────────────────────────────────────────────────────────────────────
 
-Respond with ONLY the rewritten query — no explanation."""
+CRITIC_SYSTEM = """\
+Je bent een kwaliteitscontroleur voor antwoorden over Nederlands belastingrecht.
+Beoordeel in hoeverre het antwoord aantoonbaar gefundeerd is op de gegeven bronnen.
+Let op: controleer of claims in het antwoord daadwerkelijk uit de bronnen blijken.
+Geef een getal tussen 0.0 (volledig niet-gefundeerd) en 1.0 (volledig gefundeerd).
+Antwoord UITSLUITEND met een getal (bijv. 0.85), zonder tekst of uitleg."""
 
-REWRITE_USER_PROMPT = """Original query: {query}
-Rewrite attempt: {rewrite_count}
+CRITIC_USER = """\
+BRONNEN:
+{context}
 
-Rewritten query:"""
-
-# ── Critic / hallucination checker (claude-sonnet-4-6) ───────────────────────
-
-HALLUCINATION_SYSTEM_PROMPT = """You are a faithfulness critic for a Dutch tax law Q&A system.
-
-Evaluate the generated answer on three criteria:
-1. FAITHFULNESS — every factual claim is directly supported by the source chunks
-2. SCOPE — answer stays within Dutch tax law (out-of-scope answers score 0.0)
-3. RELEVANCE — answer actually addresses the user's question
-
-Scoring guide:
-1.0  All claims supported, in-scope, directly answers the question
-0.7–0.9  Mostly supported with minor gaps
-0.4–0.6  Partially supported or only partially addresses the question
-0.1–0.3  Mostly unsupported or largely misses the question
-0.0  Not supported by chunks, out of scope, or does not address the question
-
-Respond with ONLY a decimal number between 0.0 and 1.0 (e.g. "0.85")."""
-
-HALLUCINATION_USER_PROMPT = """Source chunks:
-{chunks}
-
-User question: {query}
-
-Generated answer:
+ANTWOORD OM TE BEOORDELEN:
 {answer}
 
-Faithfulness score (0.0 to 1.0):"""
+Faithfulness score (0.0–1.0):"""
 
-# ── Safe fallback (returned when hallucination_score < 0.7) ──────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
-SAFE_FALLBACK_RESPONSE = """Ik kan deze vraag op dit moment niet met voldoende zekerheid beantwoorden \
-op basis van de beschikbare brondocumenten.
+FALLBACK_ANSWER_NL = """\
+⚠️ Het gegenereerde antwoord kon niet voldoende worden geverifieerd aan de hand \
+van de beschikbare wetsartikelen (faithfulness-score te laag).
 
-[I cannot answer this question with sufficient certainty based on the available source documents.]
+Raadpleeg voor een betrouwbaar antwoord:
+- De officiële wetsteksten op wetten.overheid.nl
+- Een belastingadviseur of fiscalist
+- De website van de Belastingdienst (belastingdienst.nl)
+"""
 
-Voor accurate informatie over Nederlandse belastingwetgeving / For accurate Dutch tax information:
-• Belastingdienst website: https://www.belastingdienst.nl
-• Belastingtelefoon: 0800-0543 (gratis, ma–do 8:00–20:00, vr 8:00–17:00)
-• Raadpleeg een registerbelastingadviseur (RB) of register accountant (RA)"""
+FALLBACK_ANSWER_EN = """\
+⚠️ The generated answer could not be sufficiently verified against the available \
+statutory sources (faithfulness score too low).
+
+For a reliable answer, please consult:
+- Official Dutch legislation at wetten.overheid.nl
+- A qualified tax advisor
+- The Dutch Tax Authority website (belastingdienst.nl)
+"""
